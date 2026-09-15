@@ -1,3 +1,4 @@
+cat > .github/workflows/win-waitevents-v9.yml <<'__EOF__'
 # Runtime check for CF #6819 v9 on Windows: does a server log write issued
 # from inside a published wait region leave the outer event in place once
 # the log call returns?  Covers EventlogWrite (write_eventlog), StderrWrite
@@ -74,13 +75,25 @@ jobs:
           sed -i 's/\r$//' src/test/modules/harness_outer_wait/run_win_harness.sh
           bash src/test/modules/harness_outer_wait/run_win_harness.sh
 
-      # Proves the eventlog case really went through write_eventlog():
-      # the harness LOG line must be in the Windows Application log.
-      - name: Show event log entries written by the harness
+      # Proves the eventlog case really went through write_eventlog(): the
+      # harness LOG line must be in the Windows Application log.  This is a
+      # hard check: without it the eventlog row could pass trivially, e.g. if
+      # RegisterEventSource() failed and write_eventlog() returned before
+      # reporting any wait.  (-LogName and -ProviderName are different
+      # parameter sets of Get-WinEvent, hence the FilterHashtable form.)
+      - name: Check the harness line reached the Windows event log
         if: always()
-        continue-on-error: true
         shell: pwsh
-        run: Get-WinEvent -LogName Application -ProviderName PostgreSQL -MaxEvents 6 | Format-List TimeCreated, Message
+        run: |
+          $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'PostgreSQL' } -MaxEvents 50 -ErrorAction SilentlyContinue
+          Write-Host "PostgreSQL events in the Application log: $(@($ev).Count)"
+          $hit = @($ev | Where-Object { $_.Message -match 'harness: logging from inside HarnessOuterWait' })
+          $hit | Format-List TimeCreated, Message
+          if ($hit.Count -eq 0) {
+            Write-Error 'harness LOG line not found in the Application log (provider PostgreSQL)'
+            exit 1
+          }
+          Write-Host "OK: $($hit.Count) matching event(s) found"
 
       - name: Upload logs
         if: always()
