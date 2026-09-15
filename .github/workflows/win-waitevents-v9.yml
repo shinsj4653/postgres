@@ -1,4 +1,3 @@
-cat > .github/workflows/win-waitevents-v9.yml <<'__EOF__'
 # Runtime check for CF #6819 v9 on Windows: does a server log write issued
 # from inside a published wait region leave the outer event in place once
 # the log call returns?  Covers EventlogWrite (write_eventlog), StderrWrite
