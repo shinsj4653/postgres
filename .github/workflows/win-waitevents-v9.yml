@@ -1,0 +1,92 @@
+# Runtime check for CF #6819 v9 on Windows: does a server log write issued
+# from inside a published wait region leave the outer event in place once
+# the log call returns?  Covers EventlogWrite (write_eventlog), StderrWrite
+# via the write() fallback (stderr is redirected on a runner, so the
+# WriteConsoleW branch is NOT exercised) and SysloggerWrite.
+#
+# Lives on a throwaway branch of the fork.  Not part of the patch series.
+# Setup steps mirror the "Windows - Visual Studio" job in pg-ci.yml.
+name: v9 wait-event restore check (Windows)
+
+on:
+  push:
+    branches: ['ci/win-waitevents-v9']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-restore-check:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Disable Windows Defender
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true -SubmitSamplesConsent NeverSend -MAPSReporting Disable
+
+      - uses: actions/checkout@v6
+
+      # pg_ctl on Windows drops admin privileges (CreateRestrictedProcess);
+      # without an explicit grant the postmaster cannot open pg_control.
+      - name: Grant workspace ACL to runner user
+        shell: pwsh
+        run: icacls "${{ github.workspace }}" /grant "${env:USERNAME}:(OI)(CI)F" /Q | Out-Null
+
+      - name: Install bison/flex (msys2), prefer Strawberry perl
+        shell: 'C:\msys64\usr\bin\bash.exe --login -eo pipefail "{0}"'
+        run: |
+          pacman -S --noconfirm --needed --asdeps bison flex
+          echo C:/msys64/usr/bin >> "$GITHUB_PATH"
+          echo C:/Strawberry/perl/bin >> "$GITHUB_PATH"
+
+      - name: Install meson
+        shell: pwsh
+        run: python -m pip install --upgrade meson
+
+      - name: Configure
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          meson setup ^
+            --backend ninja ^
+            -Dauto_features=disabled ^
+            -Dtap_tests=disabled ^
+            -Dcassert=true ^
+            --buildtype debug ^
+            -Db_pch=true ^
+            --prefix=%GITHUB_WORKSPACE%\pginst ^
+            build
+
+      - name: Build and install
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          ninja -C build || exit 1
+          ninja -C build install || exit 1
+
+      - name: Run harness (eventlog, stderr, syslogger pipe)
+        shell: bash
+        run: |
+          # tolerate CRLF in case the script was committed from a Windows checkout
+          sed -i 's/\r$//' src/test/modules/harness_outer_wait/run_win_harness.sh
+          bash src/test/modules/harness_outer_wait/run_win_harness.sh
+
+      # Proves the eventlog case really went through write_eventlog():
+      # the harness LOG line must be in the Windows Application log.
+      - name: Show event log entries written by the harness
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: Get-WinEvent -LogName Application -ProviderName PostgreSQL -MaxEvents 6 | Format-List TimeCreated, Message
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-logs-${{ github.run_id }}
+          path: |
+            server-*.log
+            build/meson-logs/**
